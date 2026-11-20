@@ -1,15 +1,18 @@
 <div align="center">
 
-# cuadricula
+**Español** · [English](README.en.md)
+
+# tesela
 
 **Un navegador de carpetas para la terminal, con mosaicos de iconos como el Finder y vista previa real de lo que tienes seleccionado.**
 
 ![macOS](https://img.shields.io/badge/macOS-solo-000000?logo=apple&logoColor=white)
 ![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)
-![Terminal](https://img.shields.io/badge/Ghostty%20%C2%B7%20Kitty-protocolo%20gr%C3%A1fico-ff9e64)
+![Terminal](https://img.shields.io/badge/terminal-Ghostty-ff9e64)
+![CI](https://github.com/Cosmichomeless/tesela/actions/workflows/ci.yml/badge.svg)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-green)
 
-<img src="docs/screenshots/vista-general.png" alt="cuadricula: mosaicos de iconos a la izquierda y vista previa a la derecha" width="900">
+<img src="docs/screenshots/vista-general.png" alt="tesela: mosaicos de iconos a la izquierda y vista previa a la derecha" width="900">
 
 </div>
 
@@ -17,7 +20,7 @@
 
 ## ¿Qué es?
 
-`cuadricula` (se lanza con `g`) es un explorador de ficheros que vive en la terminal pero **se ve y se mueve como el Finder en vista de iconos**:
+`tesela` (se lanza con `g`) es un explorador de ficheros que vive en la terminal pero **se ve y se mueve como el Finder en vista de iconos**:
 
 - a la **izquierda**, la carpeta como una cuadrícula de mosaicos con los **iconos reales de macOS**;
 - a la **derecha**, la **vista previa** de lo seleccionado y debajo sus **detalles**;
@@ -41,7 +44,7 @@ Es un único fichero de Python, sin dependencias de pip.
 
 <table>
   <tr>
-    <td align="center"><b>PDF, página 2 de 5</b><br><img src="docs/screenshots/pdf.png" width="440"></td>
+    <td align="center"><b>PDF: la rueda cambia de página</b><br><img src="docs/screenshots/pdf.png" width="440"></td>
     <td align="center"><b>Código con color</b><br><img src="docs/screenshots/codigo.png" width="440"></td>
   </tr>
   <tr>
@@ -56,7 +59,7 @@ Es un único fichero de Python, sin dependencias de pip.
 |---|---|---|
 | **Obligatorio** | macOS, `python3` | Los iconos salen de `NSWorkspace` y la conversión de imágenes de `sips` |
 | **Obligatorio** | [`eza`](https://github.com/eza-community/eza) | Lista de ficheros, orden, iconos de texto y colores |
-| **Terminal** | [Ghostty](https://ghostty.org) o [Kitty](https://sw.kovidgoyal.net/kitty/) | Protocolo gráfico para mostrar imágenes de verdad |
+| **Terminal** | [Ghostty](https://ghostty.org) (probado) | Protocolo gráfico de kitty para mostrar imágenes de verdad |
 | Opcional | `bat` | Código y texto con colores |
 | Opcional | `poppler` (`pdftoppm`, `pdfinfo`) | PDF |
 | Opcional | `ffmpegthumbnailer`, `ffmpeg` | Miniaturas y datos de vídeo |
@@ -71,8 +74,8 @@ brew install eza bat poppler ffmpegthumbnailer ffmpeg imagemagick resvg chafa
 ## Instalación
 
 ```sh
-git clone <url-del-repositorio> cuadricula
-cd cuadricula
+git clone https://github.com/Cosmichomeless/tesela.git
+cd tesela
 ./install.sh --zshrc
 ```
 
@@ -114,7 +117,7 @@ keybind = cmd+e=unbind
 ### Opciones de línea de comandos
 
 ```
-cuadricula [carpeta] [--cwd-file=RUTA] [--sel=N] [--page=N] [--dump=ANCHOxALTO]
+tesela [carpeta] [--cwd-file=RUTA] [--sel=N] [--page=N] [--dump=ANCHOxALTO]
 ```
 
 | Opción | Qué hace |
@@ -127,7 +130,7 @@ cuadricula [carpeta] [--cwd-file=RUTA] [--sel=N] [--page=N] [--dump=ANCHOxALTO]
 
 ## Personalización
 
-Todo está en un solo fichero y lo importante son unas pocas constantes al principio de `cuadricula`:
+Todo está en un solo fichero y lo importante son unas pocas constantes al principio de `tesela`:
 
 | Constante | Valor | Qué cambia |
 |---|---|---|
@@ -142,7 +145,7 @@ El reparto entre cuadrícula y vista previa (60 % / 40 %) está en la función `
 ## Cómo funciona
 
 ```
-              ┌──────────────────────────── cuadricula (Python) ────────────────────────────┐
+              ┌────────────────────────────── tesela (Python) ──────────────────────────────┐
   eza  ────►  │ lista, orden y glifos          hilo de iconos ◄── osascript + NSWorkspace   │
               │                                hilo de vistas previas                       │
   teclado ──► │ bucle principal ──► un fotograma de texto + órdenes del protocolo gráfico   │ ──► Ghostty
@@ -170,19 +173,42 @@ El reparto entre cuadrícula y vista previa (60 % / 40 %) está en la función `
 
 | Terminal | Resultado |
 |---|---|
-| Ghostty, Kitty | Todo: iconos reales, vistas previas con píxeles, rueda |
-| Otras | Mosaicos con glifo de texto en lugar de icono; las imágenes se dibujan con bloques de color si tienes `chafa` |
+| **Ghostty** | Todo: iconos reales, vistas previas con píxeles, rueda. **Es donde está probado.** |
+| Kitty, WezTerm | Usan el mismo protocolo gráfico y deberían funcionar, pero no se ha probado |
+| Otras (Terminal.app, iTerm2…) | Mosaicos con glifo de texto en lugar de icono; las imágenes se dibujan con bloques de color si tienes `chafa` |
 
-Solo macOS por ahora: depende de `NSWorkspace` y `sips`.
+> La detección se hace por `TERM` / `TERM_PROGRAM` (`ghostty` o `kitty`).
+
+Solo macOS por ahora: depende de `NSWorkspace` y `sips`. Necesitas una fuente con iconos ([Nerd Font](https://www.nerdfonts.com/)) para los glifos de reserva.
 
 ## Probarlo con ficheros de ejemplo
 
 ```sh
-scripts/make-demo.sh        # crea ~/cuadricula-demo con imágenes, un PDF, un vídeo, código…
-g ~/cuadricula-demo
+scripts/make-demo.sh        # crea ~/tesela-demo con imágenes, un PDF, un vídeo, código…
+g ~/tesela-demo
 ```
 
 Las capturas de este README están hechas con esa carpeta.
+
+## Preguntas frecuentes
+
+**¿Es un gestor de ventanas?** No: es un gestor de archivos. Explora carpetas; no mueve ventanas.
+
+**¿Por qué no usar yazi, ranger o lf?** Son excelentes (de hecho, yazi es la inspiración de la vista previa), pero ninguno ofrece una vista de mosaicos con iconos grandes estilo Finder. `tesela` hace una sola cosa: esa vista, con vista previa y detalles.
+
+**¿Borra o modifica ficheros?** No. Es de solo lectura: lista, previsualiza y abre; no escribe nada en tus carpetas.
+
+**¿Puedo cambiar el tamaño de los iconos?** Sí, con `ICON_ROWS` y `TILE_W` (ver [Personalización](#personalización)).
+
+**Veo cuadrados o glifos raros en lugar de iconos.** Pasa en terminales sin protocolo gráfico o sin una Nerd Font; usa Ghostty y una [Nerd Font](https://www.nerdfonts.com/).
+
+## Estado
+
+Versión **0.1.0** (beta). Funciona bien en el uso diario del autor, pero es joven: si algo falla, [abre una incidencia](../../issues/new/choose).
+
+## Contribuir
+
+Las ideas y los PR son bienvenidos; lee [CONTRIBUTING.md](CONTRIBUTING.md). Las pruebas de humo se ejecutan con `bash tests/smoke.sh`.
 
 ## Hoja de ruta
 

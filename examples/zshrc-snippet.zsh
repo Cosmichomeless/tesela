@@ -1,8 +1,8 @@
-# ---------- g: navegador de carpetas en cuadrícula (cuadricula) ----------
+# ---------- g: navegador de carpetas en cuadrícula (tesela) ----------
 # Al salir (Esc o q) la shell se queda en la última carpeta, como un `cd`.
 function g() {
   local tmp="$(mktemp -t "g-cwd.XXXXXX")" cwd
-  cuadricula "$@" --cwd-file="$tmp"
+  tesela "$@" --cwd-file="$tmp"
   IFS= read -r -d '' cwd < "$tmp"
   [ -n "$cwd" ] && [ "$cwd" != "$PWD" ] && builtin cd -- "$cwd"
   rm -f -- "$tmp"

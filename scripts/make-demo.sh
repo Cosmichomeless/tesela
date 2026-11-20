@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Crea una carpeta de demostración con ficheros de ejemplo (para probar y para hacer capturas).
-#   scripts/make-demo.sh [carpeta]     (por defecto ~/cuadricula-demo)
+#   scripts/make-demo.sh [carpeta]     (por defecto ~/tesela-demo)
 # Necesita: imagemagick, ffmpeg y cupsfilter (viene con macOS).
 set -euo pipefail
-D="${1:-$HOME/cuadricula-demo}"
+D="${1:-$HOME/tesela-demo}"
 rm -rf "$D"; mkdir -p "$D"/{Documentos,Fotos,Proyectos,Música,Descargas,Escritorio}
 cd "$D"
 
@@ -42,4 +42,4 @@ echo x > a.txt; zip -q copia-seguridad.zip a.txt; rm a.txt
 echo hola > Documentos/contrato.txt; echo x > Fotos/vacaciones.jpg; echo x > Proyectos/web.html
 
 echo "✓ Demo creada en $D"
-echo "  Pruébala con:  cuadricula \"$D\"      (o  g \"$D\")"
+echo "  Pruébala con:  tesela \"$D\"      (o  g \"$D\")"

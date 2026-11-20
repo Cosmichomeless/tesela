@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vulnerabilidad de seguridad / Security vulnerability
+    url: https://github.com/Cosmichomeless/tesela/security/advisories/new
+    about: Por favor informa de forma privada, no con una incidencia pública.

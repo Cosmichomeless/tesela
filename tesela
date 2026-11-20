@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""cuadricula: navegador de carpetas en cuadrícula con vista previa (iconos y colores de eza).
+"""tesela: navegador de carpetas para la terminal, con mosaicos de iconos y vista previa.
 
-Uso: cuadricula [carpeta] [--cwd-file=RUTA] [--sel=N] [--page=N] [--dump=ANCHOxALTO]
+Uso: tesela [carpeta] [--cwd-file=RUTA] [--sel=N] [--page=N] [--dump=ANCHOxALTO]
+     tesela --help | --version
 Se lanza con la función `g` del .zshrc, que hace el cd a la carpeta final.
 
-Izquierda: cuadrícula de la carpeta. Derecha: vista previa de lo seleccionado
-(código/texto con bat, carpetas con eza, imágenes/PDF/vídeo/SVG con chafa).
+Izquierda: mosaicos con los iconos del sistema. Derecha: vista previa de lo seleccionado
+(código y texto con bat, carpetas con eza, imágenes/PDF/vídeo/SVG como imagen real) y sus detalles.
 
 Teclas: flechas mover · Enter entrar (carpeta) / abrir (fichero) · Retroceso subir ·
-        Espacio Vista Previa · Cmd+E Finder · . ocultos · Esc o q salir
+        Espacio Vista Previa · Cmd+E Finder · . ocultos · rueda: páginas de PDF / líneas · Esc o q salir
 """
-import base64, hashlib, itertools, threading, fcntl, os, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time, tty, unicodedata
+import atexit, base64, hashlib, itertools, threading, fcntl, os, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time, tty, unicodedata
 
+__version__ = "0.1.0"
 EZA = shutil.which("eza") or "/opt/homebrew/bin/eza"
 AMBER, DARK, DIM = (255, 158, 100), (29, 22, 18), (133, 118, 106)
 RESET = "\x1b[0m"
@@ -309,7 +311,7 @@ def make_preview(path, is_dir, w, h, kitty=False, page=0):
         if r and r.stdout.strip():
             return r.stdout.rstrip("\n").split("\n")[:h]
         return [fg(DIM) + "(carpeta vacía)" + RESET]
-    tmp = tempfile.mkdtemp(prefix="cuadricula-")
+    tmp = tempfile.mkdtemp(prefix="tesela-")
     try:
         img = None
         if ext in IMG_EXT:
@@ -551,9 +553,10 @@ class IconWorker:
         self.queue, self.done, self.transmit, self.by_sha = [], {}, {}, {}
         self.pending, self.ready, self.busy = set(), False, False
         self.cv = threading.Condition()
-        fd, self.script = tempfile.mkstemp(suffix=".js", prefix="cuadricula-")
+        fd, self.script = tempfile.mkstemp(suffix=".js", prefix="tesela-")
         os.write(fd, ICONS_JXA.encode())
         os.close(fd)
+        atexit.register(lambda p=self.script: os.path.exists(p) and os.unlink(p))   # no dejar basura en /tmp
         threading.Thread(target=self.loop, daemon=True).start()
 
     def request(self, items):
@@ -575,7 +578,7 @@ class IconWorker:
                 batch = self.queue[:24]
                 del self.queue[:24]
                 self.busy = True
-            tmp = tempfile.mkdtemp(prefix="cuadricula-ico-")
+            tmp = tempfile.mkdtemp(prefix="tesela-ico-")
             try:
                 run(["osascript", "-l", "JavaScript", self.script, tmp, *[pth for _, pth in batch]], timeout=30)
                 for n, (key, _) in enumerate(batch):
@@ -801,13 +804,24 @@ def bg_open(args):
 def main():
     path, cwd_file, dump, sel, st_page = os.getcwd(), None, None, 0, 0
     for a in sys.argv[1:]:
+        if a in ("-h", "--help"):
+            print((__doc__ or "").strip())
+            return
+        if a in ("-V", "--version"):
+            print(f"tesela {__version__}")
+            return
+    for a in sys.argv[1:]:
         if a.startswith("--cwd-file="): cwd_file = a.split("=", 1)[1]
         elif a.startswith("--dump="): dump = a.split("=", 1)[1]
         elif a.startswith("--sel="): sel = int(a.split("=", 1)[1])
         elif a.startswith("--page="): st_page = int(a.split("=", 1)[1])
         else: path = os.path.abspath(os.path.expanduser(a))
     if not os.path.isdir(path):
-        sys.exit(f"cuadricula: no es una carpeta: {path}")
+        sys.exit(f"tesela: no es una carpeta: {path}")
+    if not (os.path.isfile(EZA) and os.access(EZA, os.X_OK)):
+        sys.exit("tesela: falta eza (es obligatorio). Instálalo con:  brew install eza")
+    if not dump and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        sys.exit("tesela: necesita una terminal interactiva (usa --dump=ANCHOxALTO para una salida de texto)")
     st = State(path)
 
     if dump:

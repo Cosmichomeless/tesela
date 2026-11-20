@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencias
+        run: brew install eza bat
+      - name: Sintaxis
+        run: |
+          python3 -m py_compile tesela
+          bash -n install.sh scripts/make-demo.sh tests/smoke.sh
+      - name: Pruebas de humo
+        run: bash tests/smoke.sh

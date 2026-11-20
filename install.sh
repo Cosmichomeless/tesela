@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Instala `cuadricula` en ~/.local/bin y comprueba las dependencias.
+# Instala `tesela` en ~/.local/bin y comprueba las dependencias.
 #
 #   ./install.sh            instala el script y revisa dependencias
 #   ./install.sh --zshrc    además añade la función `g` a ~/.zshrc (si no existe)
@@ -9,8 +9,8 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 DEST="${PREFIX:-$HOME/.local/bin}"
 
 mkdir -p "$DEST"
-install -m 0755 "$DIR/cuadricula" "$DEST/cuadricula"
-echo "✓ Instalado en $DEST/cuadricula"
+install -m 0755 "$DIR/tesela" "$DEST/tesela"
+echo "✓ Instalado en $DEST/tesela"
 
 check() { # comando · para qué sirve · paquete de brew
   if command -v "$1" >/dev/null 2>&1; then
@@ -42,7 +42,7 @@ esac
 
 SNIPPET="$DIR/examples/zshrc-snippet.zsh"
 if [[ "${1:-}" == "--zshrc" ]]; then
-  if grep -q "cuadricula" "$HOME/.zshrc" 2>/dev/null; then
+  if grep -q "tesela" "$HOME/.zshrc" 2>/dev/null; then
     echo; echo "✓ ~/.zshrc ya contiene la función g (no se toca)"
   else
     { echo; cat "$SNIPPET"; } >> "$HOME/.zshrc"
