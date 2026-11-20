@@ -1,0 +1,970 @@
+#!/usr/bin/env python3
+"""cuadricula: navegador de carpetas en cuadrícula con vista previa (iconos y colores de eza).
+
+Uso: cuadricula [carpeta] [--cwd-file=RUTA] [--sel=N] [--page=N] [--dump=ANCHOxALTO]
+Se lanza con la función `g` del .zshrc, que hace el cd a la carpeta final.
+
+Izquierda: cuadrícula de la carpeta. Derecha: vista previa de lo seleccionado
+(código/texto con bat, carpetas con eza, imágenes/PDF/vídeo/SVG con chafa).
+
+Teclas: flechas mover · Enter entrar (carpeta) / abrir (fichero) · Retroceso subir ·
+        Espacio Vista Previa · Cmd+E Finder · . ocultos · Esc o q salir
+"""
+import base64, hashlib, itertools, threading, fcntl, os, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time, tty, unicodedata
+
+EZA = shutil.which("eza") or "/opt/homebrew/bin/eza"
+AMBER, DARK, DIM = (255, 158, 100), (29, 22, 18), (133, 118, 106)
+RESET = "\x1b[0m"
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+OTHER_ESC = re.compile(r"\x1b\[\?[0-9;]*[hl]|\x1b\[[0-9;]*[ABCDHJKfsu]")
+TOKEN = re.compile(r"(\x1b\[[0-9;]*m)|(.)", re.S)
+IMG_EXT = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
+VIDEO_EXT = {"mp4", "mov", "mkv", "avi", "webm", "m4v"}
+MIN_WIDE = 64   # por debajo de este ancho se oculta la vista previa
+DET_H = 7       # filas del bloque de detalles (1 separador + 6 líneas)
+TILE_W = 16     # ancho de cada mosaico (columnas) · súbelo para iconos más anchos
+ICON_ROWS = 5   # alto del icono (filas) · súbelo para iconos más grandes
+TILE_H = ICON_ROWS + 3   # icono + 2 líneas de nombre + 1 de aire
+SEL_BG, TEXT = (74, 54, 38), (242, 227, 208)
+PLACE_DEL = "\x1b_Ga=d,d=a,q=2\x1b\\"   # quita las colocaciones (conserva los datos)
+ICONS_JXA = r"""ObjC.import('AppKit');
+function run(argv) {
+  var ws = $.NSWorkspace.sharedWorkspace, outdir = argv[0], N = 256;
+  for (var i = 1; i < argv.length; i++) {
+    var img = ws.iconForFile($(argv[i]));
+    var rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(
+      $(), N, N, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
+    $.NSGraphicsContext.saveGraphicsState;
+    $.NSGraphicsContext.setCurrentContext($.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep));
+    img.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, N, N), $.NSZeroRect, $.NSCompositeSourceOver, 1.0);
+    $.NSGraphicsContext.restoreGraphicsState;
+    var png = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+    png.writeToFileAtomically($(outdir + '/' + (i - 1) + '.png'), true);
+  }
+  return 'ok';
+}
+"""
+_IDS = itertools.count(100)   # identificadores de imagen para el protocolo gráfico
+KITTY_DEL = "\x1b_Ga=d,d=A,q=2\x1b\\"   # borra todas las imágenes del protocolo gráfico
+
+
+def kitty_supported():
+    t = (os.environ.get("TERM", "") + " " + os.environ.get("TERM_PROGRAM", "")).lower()
+    return "ghostty" in t or "kitty" in t
+
+
+def fg(c): return f"\x1b[38;2;{c[0]};{c[1]};{c[2]}m"
+def bg(c): return f"\x1b[48;2;{c[0]};{c[1]};{c[2]}m"
+
+
+def char_w(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+
+
+def strip(s): return ANSI.sub("", s)
+def vis(s): return sum(char_w(c) for c in strip(s))
+def pad(s, w): return s + " " * max(0, w - vis(s))
+
+
+def trunc(s, w):
+    """Recorta a w columnas visibles conservando los códigos de color."""
+    if w <= 0:
+        return ""
+    if vis(s) <= w:
+        return s
+    out, n = [], 0
+    for m in TOKEN.finditer(s):
+        if m.group(1):
+            out.append(m.group(1))
+            continue
+        k = char_w(m.group(2))
+        if n + k > w - 1:
+            break
+        out.append(m.group(2))
+        n += k
+    return "".join(out) + "…" + RESET
+
+
+def run(cmd, timeout=5):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, errors="replace")
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def eza_env():
+    return dict(os.environ, EZA_CONFIG_DIR=os.path.expanduser("~/.config/eza"))
+
+
+def list_dir(path, hidden):
+    """Devuelve [(nombre, texto_coloreado, es_carpeta)] en el orden de eza."""
+    base = ["-1", "--no-quotes", "--group-directories-first"] + (["-a"] if hidden else [])
+    def go(extra):
+        try:
+            r = subprocess.run([EZA, *base, *extra, path], capture_output=True, text=True,
+                               env=eza_env(), stdin=subprocess.DEVNULL, timeout=10)
+        except (subprocess.TimeoutExpired, OSError):
+            return []
+        return r.stdout.split("\n")[:-1] if r.stdout else []
+    names = go(["--color=never"])
+    colored = go(["--icons=always", "--color=always"])
+    if len(names) != len(colored):  # nombres raros (saltos de línea): sin color
+        colored = names
+    return [(n, c, os.path.isdir(os.path.join(path, n))) for n, c in zip(names, colored)]
+
+
+def short(path):
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
+
+
+# ---------- vista previa ----------
+def human(n):
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024 or u == "GB":
+            return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+        n /= 1024
+
+
+def is_text(path):
+    try:
+        with open(path, "rb") as f:
+            return b"\0" not in f.read(4096)
+    except OSError:
+        return False
+
+
+def chafa_lines(img, w, h):
+    r = run(["chafa", "--format=symbols", "--colors=full", "--animate=off",
+             f"--size={w}x{h}", img], timeout=8)
+    if not r or r.returncode != 0 or not r.stdout.strip():
+        return None
+    return [OTHER_ESC.sub("", l) for l in r.stdout.rstrip("\n").split("\n")]
+
+
+_PAGES = {}
+
+
+def pdf_pages(path):
+    """Número de páginas de un PDF (0 si no se sabe); con caché."""
+    if path not in _PAGES:
+        n = 0
+        r = run(["pdfinfo", path], timeout=5) if shutil.which("pdfinfo") else None
+        if r:
+            m = re.search(r"^Pages:\s+(\d+)", r.stdout, re.M)
+            n = int(m.group(1)) if m else 0
+        _PAGES[path] = n
+    return _PAGES[path]
+
+
+def text_lines(path):
+    try:
+        if os.path.getsize(path) > 20_000_000:
+            return 0
+        with open(path, "rb") as f:
+            return sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1 << 20), b"")) + 1
+    except OSError:
+        return 0
+
+
+def cell_px():
+    """Tamaño de una celda en píxeles (para escalar la imagen sin deformarla)."""
+    try:
+        rows, cols, xp, yp = struct.unpack("HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+        if rows and cols and xp and yp:
+            return xp / cols, yp / rows
+    except Exception:
+        pass
+    return 9.0, 18.0
+
+
+def kitty_png(png, pw, ph):
+    """Imagen real con el protocolo gráfico de kitty (Ghostty). -> ('kitty', datos, cols, filas)."""
+    try:
+        with open(png, "rb") as f:
+            data = f.read()
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        iw, ih = struct.unpack(">II", data[16:24])
+    except (OSError, struct.error):
+        return None
+    cw, chh = cell_px()
+    scale = min(pw * cw / iw, ph * chh / ih)
+    cols = max(1, min(pw, round(iw * scale / cw)))
+    rows = max(1, min(ph, round(ih * scale / chh)))
+    iid = next(_IDS)
+    b64 = base64.standard_b64encode(data).decode()
+    chunks = [b64[i:i + 4096] for i in range(0, len(b64), 4096)]
+    out = []
+    for i, ch in enumerate(chunks):
+        m = 1 if i < len(chunks) - 1 else 0
+        ctl = f"a=t,f=100,t=d,i={iid},q=2,m={m}" if i == 0 else f"q=2,m={m}"
+        out.append(f"\x1b_G{ctl};{ch}\x1b\\")
+    return ("kitty", iid, "".join(out), cols, rows)
+
+
+def to_png(img, tmp):
+    """PNG de tamaño razonable a partir de cualquier imagen (o None)."""
+    is_png = img.lower().endswith(".png")
+    try:
+        small = os.path.getsize(img) < 3_000_000
+    except OSError:
+        return None
+    if is_png and small:
+        return img
+    out = os.path.join(tmp, "c.png")
+    if shutil.which("sips"):
+        run(["sips", "-s", "format", "png", "-Z", "1400", img, "--out", out], timeout=15)
+        if os.path.exists(out):
+            return out
+    if shutil.which("magick"):
+        run(["magick", img + "[0]", "-auto-orient", "-resize", "1400x1400>", out], timeout=20)
+        if os.path.exists(out):
+            return out
+    return img if is_png else None
+
+
+def info_lines(path, why=""):
+    try:
+        s = os.stat(path)
+    except OSError:
+        return [fg(DIM) + "(no se puede leer)" + RESET]
+    kind = (run(["file", "-b", path]) or type("x", (), {"stdout": ""})).stdout.strip()
+    import time
+    out = [fg(AMBER) + "\x1b[1m" + os.path.basename(path) + RESET, "",
+           fg(DIM) + "Tipo     " + RESET + (kind[:200] or "—"),
+           fg(DIM) + "Tamaño   " + RESET + human(s.st_size),
+           fg(DIM) + "Cambio   " + RESET + time.strftime("%d %b %Y %H:%M", time.localtime(s.st_mtime))]
+    if why:
+        out += ["", fg(DIM) + why + RESET]
+    return out
+
+
+def make_details(path, is_dir):
+    """[(etiqueta, valor)] con los detalles del fichero o carpeta."""
+    try:
+        s = os.stat(path)
+    except OSError:
+        return []
+    when = time.strftime("%d %b %Y %H:%M", time.localtime(s.st_mtime))
+    ext = path.rsplit(".", 1)[-1].lower() if "." in os.path.basename(path) else ""
+    if is_dir:
+        try:
+            n = len(os.listdir(path))
+        except OSError:
+            n = None
+        return [("Tipo", "Carpeta"), ("Elementos", str(n) if n is not None else "—"), ("Modificado", when)]
+    rows = []
+    r = run(["file", "-b", path])
+    kind = r.stdout.strip().split(",")[0] if r and r.stdout.strip() else "—"
+    if kind == "ISO Media":
+        kind = {"heic": "Imagen HEIC", "heif": "Imagen HEIF", "mp4": "Vídeo MP4", "m4v": "Vídeo MP4",
+                "mov": "Vídeo QuickTime"}.get(ext, kind)
+    rows += [("Tipo", kind), ("Tamaño", human(s.st_size))]
+    if ext in IMG_EXT | {"heic", "heif"} and shutil.which("sips"):
+        r = run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path], timeout=5)
+        w = re.search(r"pixelWidth:\s*(\d+)", r.stdout) if r else None
+        h = re.search(r"pixelHeight:\s*(\d+)", r.stdout) if r else None
+        if w and h:
+            rows.append(("Dimensiones", f"{w.group(1)} × {h.group(1)} px"))
+    elif ext == "pdf" and shutil.which("pdfinfo"):
+        r = run(["pdfinfo", path], timeout=5)
+        if r:
+            pg = re.search(r"^Pages:\s+(\d+)", r.stdout, re.M)
+            sz = re.search(r"^Page size:\s+(.+)$", r.stdout, re.M)
+            if pg:
+                _PAGES[path] = int(pg.group(1))
+                rows.append(("Páginas", pg.group(1)))
+            if sz:
+                rows.append(("Tamaño pág.", sz.group(1).strip()))
+    elif ext in VIDEO_EXT and shutil.which("ffprobe"):
+        r = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=width,height", "-show_entries", "format=duration", "-of", "default=nw=1", path], timeout=6)
+        if r:
+            w = re.search(r"width=(\d+)", r.stdout)
+            h = re.search(r"height=(\d+)", r.stdout)
+            d = re.search(r"duration=([\d.]+)", r.stdout)
+            if d:
+                t = int(float(d.group(1)))
+                rows.append(("Duración", f"{t // 60}:{t % 60:02d}"))
+            if w and h:
+                rows.append(("Resolución", f"{w.group(1)} × {h.group(1)}"))
+    elif ext not in IMG_EXT | VIDEO_EXT and is_text(path):
+        n = text_lines(path)
+        if n:
+            rows.append(("Líneas", str(n)))
+    rows.append(("Modificado", when))
+    return rows
+
+
+def make_preview(path, is_dir, w, h, kitty=False, page=0):
+    """Líneas (con color) de la vista previa de path, de ancho <= w y alto <= h."""
+    ext = path.rsplit(".", 1)[-1].lower() if "." in os.path.basename(path) else ""
+    if is_dir:
+        r = run([EZA, "-1", "--no-quotes", "--group-directories-first", "--icons=always",
+                 "--color=always", path], timeout=5)
+        if r and r.stdout.strip():
+            return r.stdout.rstrip("\n").split("\n")[:h]
+        return [fg(DIM) + "(carpeta vacía)" + RESET]
+    tmp = tempfile.mkdtemp(prefix="cuadricula-")
+    try:
+        img = None
+        if ext in IMG_EXT:
+            img = path
+        elif ext == "pdf" and shutil.which("pdftoppm"):
+            base = os.path.join(tmp, "p")
+            run(["pdftoppm", "-png", "-r", "150" if kitty else "110", "-f", str(page + 1), "-l", str(page + 1), "-singlefile", path, base], timeout=15)
+            img = base + ".png" if os.path.exists(base + ".png") else None
+        elif ext in VIDEO_EXT and shutil.which("ffmpegthumbnailer"):
+            img = os.path.join(tmp, "v.png")
+            run(["ffmpegthumbnailer", "-i", path, "-o", img, "-s", "0"], timeout=8)
+            img = img if os.path.exists(img) else None
+        elif ext == "svg" and shutil.which("resvg"):
+            img = os.path.join(tmp, "s.png")
+            run(["resvg", "-w", "800", path, img], timeout=8)
+            img = img if os.path.exists(img) else None
+        elif ext in ("heic", "heif"):
+            img = os.path.join(tmp, "h.png")
+            if shutil.which("sips"):     # nativo de macOS: mucho más rápido que ImageMagick
+                run(["sips", "-s", "format", "png", "-Z", "1400", path, "--out", img], timeout=15)
+            if not os.path.exists(img) and shutil.which("magick"):
+                run(["magick", path + "[0]", "-resize", "1400x1400>", img], timeout=20)
+            img = img if os.path.exists(img) else None
+        if img and kitty:
+            png = to_png(img, tmp)
+            res = kitty_png(png, w, h) if png else None
+            if res:
+                return res
+        if img:
+            lines = chafa_lines(img, w, h)
+            if lines:
+                return lines[:h]
+            return info_lines(path, "(no se pudo generar la vista previa)")
+        try:
+            big = os.path.getsize(path) > 2_000_000
+        except OSError:
+            big = True
+        if is_text(path):
+            if not big and shutil.which("bat"):
+                r = run(["bat", "--color=always", "--style=plain", "--paging=never", "--wrap=never",
+                         "--theme=ansi", "--tabs=2", f"--line-range={page + 1}:{page + h}", path], timeout=5)
+                if r and r.stdout:
+                    return r.stdout.rstrip("\n").split("\n")[:h]
+            try:
+                with open(path, errors="replace") as f:
+                    for _ in range(page):
+                        f.readline()
+                    return [l.rstrip("\n").expandtabs(2) for _, l in zip(range(h), f)]
+            except OSError:
+                pass
+        return info_lines(path)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+class State:
+    def __init__(self, path, hidden=False):
+        self.path, self.hidden, self.sel, self.top = path, hidden, 0, 0
+        self.cache = {}
+        self.kitty = False
+        self.img = None
+        self.page = 0
+        self.sent, self.placed, self.last_img = [], None, None
+        self.dcache = {}
+        self.icons, self.sent_icons, self.grid, self.tiles = None, set(), (1, 1), []
+        self.reload()
+
+    def reload(self):
+        try:
+            self.mtime = os.stat(self.path).st_mtime
+        except OSError:
+            self.mtime = 0
+        self.entries = list_dir(self.path, self.hidden)
+        self.sel = max(0, min(self.sel, len(self.entries) - 1))
+
+    def changed(self):
+        try:
+            return os.stat(self.path).st_mtime != self.mtime
+        except OSError:
+            return False
+
+    def refresh(self):
+        """Recarga la carpeta conservando el elemento seleccionado (por nombre)."""
+        keep = self.entries[self.sel][0] if self.entries else None
+        self.reload()
+        for i, e in enumerate(self.entries):
+            if e[0] == keep:
+                self.sel = i
+
+    def go(self, path, select_name=None):
+        self.path, self.sel, self.top, self.page = path, 0, 0, 0
+        self.reload()
+        if select_name:
+            for i, e in enumerate(self.entries):
+                if e[0] == select_name:
+                    self.sel = i
+                    break
+
+    def has_icon(self, i):
+        return bool(self.icons and self.icons.done.get(icon_key(self, i)[0]) is not None)
+
+    def current(self):
+        return os.path.join(self.path, self.entries[self.sel][0]) if self.entries else None
+
+    def preview_key(self, pw, ph):
+        cur = self.current()
+        if not cur:
+            return None
+        try:
+            m = os.stat(cur).st_mtime
+        except OSError:
+            m = 0
+        return (cur, m, pw, ph, self.page)
+
+    def need(self, pw, ph, page=None):
+        """(clave, argumentos) de la vista previa que falta por calcular, o None."""
+        page = self.page if page is None else page
+        key = self.preview_key(pw, ph)
+        if key is None:
+            return None
+        key = key[:4] + (page,)
+        if key in self.cache:
+            return None
+        return key, (key[0], self.entries[self.sel][2], pw, ph, self.kitty, page)
+
+    def preview(self, pw, ph, compute):
+        """Líneas de la vista previa; None si no está en caché y compute=False."""
+        key = self.preview_key(pw, ph)
+        if key is None:
+            return []
+        if key in self.cache:
+            return self.cache[key]
+        if not compute:
+            return None
+        if len(self.cache) > 40:
+            self.cache.clear()
+        self.dcache.setdefault((key[0], key[1]), make_details(key[0], self.entries[self.sel][2]))
+        lines = make_preview(key[0], self.entries[self.sel][2], pw, ph, self.kitty, self.page)
+        self.cache[key] = lines
+        return lines
+
+
+class Worker:
+    """Calcula las vistas previas en un hilo aparte: la interfaz nunca se queda esperando."""
+    def __init__(self, cache, dcache):
+        self.cache, self.dcache, self.req, self.busy, self.last, self.ready = cache, dcache, None, None, None, False
+        self.cv = threading.Condition()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def request(self, key, args):
+        with self.cv:
+            self.req, self.last = (key, args), key
+            self.cv.notify()
+
+    def loop(self):
+        while True:
+            with self.cv:
+                while self.req is None:
+                    self.cv.wait()
+                key, args = self.req
+                self.req, self.busy = None, key
+            try:
+                m = os.stat(args[0]).st_mtime
+            except OSError:
+                m = 0
+            if (args[0], m) not in self.dcache:      # los detalles son rápidos: salen enseguida
+                try:
+                    self.dcache[(args[0], m)] = make_details(args[0], args[1])
+                except Exception:
+                    self.dcache[(args[0], m)] = []
+                if len(self.dcache) > 300:
+                    self.dcache.clear()
+                with self.cv:
+                    self.ready = True
+            try:
+                res = make_preview(*args)
+            except Exception as e:           # nunca romper la interfaz por una vista previa
+                res = [fg(DIM) + f"(sin vista previa: {type(e).__name__})" + RESET]
+            if len(self.cache) > 60:
+                self.cache.clear()
+            self.cache[key] = res
+            with self.cv:
+                self.busy, self.ready = None, True
+
+
+def preview_h(H):
+    body = max(1, H - 2)
+    return body - DET_H if body >= 14 else body
+
+
+def detail_lines(st, pw):
+    """Exactamente DET_H - 1 líneas con los detalles del elemento seleccionado."""
+    cur, out = st.current(), []
+    if cur:
+        try:
+            m = os.stat(cur).st_mtime
+        except OSError:
+            m = 0
+        out.append(" " + fg(AMBER) + "\x1b[1m" + trunc(os.path.basename(cur), pw) + RESET)
+        for label, val in st.dcache.get((cur, m), []):
+            if label == "Páginas" and val.isdigit():
+                val = f"{st.page + 1} de {val}"
+            out.append(" " + fg(DIM) + pad(label, 12) + RESET + trunc(val, max(1, pw - 12)))
+    out = [trunc(l, pw + 1) for l in out[:DET_H - 1]]
+    return out + [""] * (DET_H - 1 - len(out))
+
+
+def panes(W):
+    """(ancho de la cuadrícula, ancho de la vista previa); la previa es 0 si no cabe."""
+    if W < MIN_WIDE:
+        return W, 0
+    lw = max(30, round(W * 0.6))   # 60 % cuadrícula, 40 % vista previa
+    return lw, W - lw - 1
+
+
+def kitty_transmit(iid, data):
+    b64 = base64.standard_b64encode(data).decode()
+    chunks = [b64[i:i + 4096] for i in range(0, len(b64), 4096)]
+    out = []
+    for n, ch in enumerate(chunks):
+        m = 1 if n < len(chunks) - 1 else 0
+        ctl = f"a=t,f=100,t=d,i={iid},q=2,m={m}" if n == 0 else f"q=2,m={m}"
+        out.append(f"\x1b_G{ctl};{ch}\x1b\\")
+    return "".join(out)
+
+
+def icon_key(st, i):
+    """(clave de caché, ruta de ejemplo) del icono del elemento i."""
+    name, _, isdir = st.entries[i]
+    path = os.path.join(st.path, name)
+    if isdir or "." not in name.strip("."):
+        return ("d" if isdir else "f", path), path
+    return ("e", name.rsplit(".", 1)[-1].lower()), path
+
+
+class IconWorker:
+    # Pide a macOS los iconos del sistema (NSWorkspace) en segundo plano y por lotes.
+    def __init__(self):
+        self.queue, self.done, self.transmit, self.by_sha = [], {}, {}, {}
+        self.pending, self.ready, self.busy = set(), False, False
+        self.cv = threading.Condition()
+        fd, self.script = tempfile.mkstemp(suffix=".js", prefix="cuadricula-")
+        os.write(fd, ICONS_JXA.encode())
+        os.close(fd)
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def request(self, items):
+        with self.cv:
+            added = False
+            for key, path in items:
+                if key not in self.done and key not in self.pending:
+                    self.pending.add(key)
+                    self.queue.append((key, path))
+                    added = True
+            if added:
+                self.cv.notify()
+
+    def loop(self):
+        while True:
+            with self.cv:
+                while not self.queue:
+                    self.cv.wait()
+                batch = self.queue[:24]
+                del self.queue[:24]
+                self.busy = True
+            tmp = tempfile.mkdtemp(prefix="cuadricula-ico-")
+            try:
+                run(["osascript", "-l", "JavaScript", self.script, tmp, *[pth for _, pth in batch]], timeout=30)
+                for n, (key, _) in enumerate(batch):
+                    try:
+                        with open(os.path.join(tmp, f"{n}.png"), "rb") as f:
+                            data = f.read()
+                    except OSError:
+                        self.done[key] = None          # sin icono: se queda el marcador
+                        continue
+                    sha = hashlib.sha1(data).hexdigest()
+                    iid = self.by_sha.get(sha)
+                    if iid is None:                      # iconos idénticos comparten imagen
+                        iid = next(_IDS)
+                        self.by_sha[sha] = iid
+                        self.transmit[iid] = kitty_transmit(iid, data)
+                    self.done[key] = iid
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+                with self.cv:
+                    for key, _ in batch:
+                        self.pending.discard(key)
+                        self.done.setdefault(key, None)
+                    self.busy, self.ready = False, True
+
+
+def split_w(s, w):
+    n = 0
+    for k, ch in enumerate(s):
+        cwid = char_w(ch)
+        if n + cwid > w:
+            return s[:k], s[k:]
+        n += cwid
+    return s, ""
+
+
+def wrap_name(name, w):
+    """Nombre en 1-2 líneas; si no cabe, recorta por el medio conservando la extensión."""
+    if vis(name) <= w:
+        return [name]
+    first, rest = split_w(name, w)
+    cut = max(first.rfind(" "), first.rfind("-"), first.rfind("_"))
+    if cut >= w // 3:
+        first, rest = name[:cut + 1], name[cut + 1:]
+    first, rest = first.rstrip(), rest.lstrip()
+    if vis(rest) > w:
+        tail = rest[-4:] if "." in rest[-5:] else rest[-3:]
+        head, _ = split_w(rest, max(1, w - 1 - len(tail)))
+        rest = head + "…" + tail
+    return [first, rest]
+
+
+def center_row(text, text_w, selected):
+    pre = max(0, (TILE_W - text_w) // 2)
+    post = max(0, TILE_W - text_w - pre)
+    if selected:
+        return " " + bg(SEL_BG) + " " * max(0, pre - 1) + text + bg(SEL_BG) + " " * max(0, post - 1) + RESET + " "
+    return " " * pre + text + " " * post
+
+
+def tile_lines(st, i, selected, has_icon):
+    """TILE_H líneas de texto del mosaico i (el icono real se pinta encima con la imagen)."""
+    name, colored, isdir = st.entries[i]
+    lines = []
+    for j in range(ICON_ROWS):
+        if not has_icon and j == ICON_ROWS // 2:           # marcador mientras llega el icono
+            g = strip(colored)[:1] or "?"
+            lines.append(center_row(fg(AMBER if isdir else DIM) + g + RESET, 1, selected))
+        elif selected:
+            lines.append(" " + bg(SEL_BG) + " " * (TILE_W - 2) + RESET + " ")
+        else:
+            lines.append(" " * TILE_W)
+    for txt in wrap_name(name, TILE_W - 2)[:2]:
+        if selected:
+            lines.append(center_row(bg(AMBER) + fg(DARK) + "\x1b[1m " + txt + " " + RESET, vis(txt) + 2, False))
+        else:
+            lines.append(center_row(fg(AMBER if isdir else TEXT) + txt + RESET, vis(txt), False))
+    while len(lines) < TILE_H:
+        lines.append(" " * TILE_W)
+    return lines[:TILE_H]
+
+
+def icon_cmds(st):
+    """Secuencias gráficas: envía los iconos nuevos y los coloca sobre cada mosaico visible."""
+    iw = st.icons
+    cols, rows_vis = st.grid
+    cw, chh = cell_px()
+    icols = max(2, min(TILE_W - 2, round(ICON_ROWS * chh / cw)))
+    first, last = st.top * cols, min(len(st.entries), (st.top + rows_vis + 2) * cols)
+    iw.request([icon_key(st, i) for i in range(first, last)])    # visibles + 2 filas siguientes
+    out = []
+    for n, (i, y, x) in enumerate(st.tiles):
+        iid = iw.done.get(icon_key(st, i)[0])
+        if iid is None:
+            continue
+        if iid not in st.sent_icons:
+            out.append(iw.transmit[iid])
+            st.sent_icons.add(iid)
+        out.append(f"\x1b[{y};{x + (TILE_W - icols) // 2}H\x1b_Ga=p,i={iid},p={10 + n},c={icols},r={ICON_ROWS},C=1,q=2\x1b\\")
+    return "".join(out)
+
+
+def metrics(st, lw, H):
+    body = max(1, H - 2)
+    return TILE_W, TILE_H, max(1, lw // TILE_W), max(1, body // TILE_H)
+
+
+def frame(st, W, H, compute=True):
+    lw, rw = panes(W)
+    tile_w, tile_h, cols, rows_vis = metrics(st, lw, H)
+    body = max(1, H - 2)
+    st.grid = (cols, rows_vis)
+    row = st.sel // cols
+    if row < st.top: st.top = row
+    if row >= st.top + rows_vis: st.top = row - rows_vis + 1
+
+    left, st.tiles = [], []
+    if not st.entries:
+        left.append(" " + fg(DIM) + "(carpeta vacía)" + RESET)
+    for r in range(st.top, st.top + rows_vis):
+        tiles = []
+        for c in range(cols):
+            i = r * cols + c
+            if i >= len(st.entries):
+                break
+            tiles.append(tile_lines(st, i, i == st.sel, st.has_icon(i)))
+            st.tiles.append((i, 2 + len(left), c * tile_w + 1))
+        if not tiles:
+            break
+        for j in range(tile_h):
+            left.append("".join(t[j] for t in tiles))
+    left = [pad(l, lw) for l in left][:body]
+    left += [" " * lw] * (body - len(left))
+
+    st.img = None
+    right = [""] * body
+    if rw > 0:
+        pw = rw - 2
+        ph = preview_h(H)
+        pv = st.preview(pw, ph, compute)
+        if pv is None:
+            li = st.last_img
+            if li and li[1] == st.current():     # mismo fichero (otra página): se mantiene la anterior
+                st.img, pv = li[0], []
+            else:
+                pv = [fg(DIM) + "cargando…" + RESET]
+        elif isinstance(pv, tuple):              # imagen real: se pinta después del texto
+            st.img = (pv[1], pv[2], pv[3], pv[4], 2, lw + 3)
+            pv = []
+        right = [(" " + trunc(l, pw) + RESET) if l else "" for l in pv[:ph]]
+        right += [""] * (ph - len(right))
+        if ph < body:
+            right += [" " + fg(DIM) + "─" * pw + RESET] + detail_lines(st, pw)
+
+    sep = fg(DIM) + "│" + RESET
+    rows = [(l + sep + r) if rw > 0 else l for l, r in zip(left, right)]
+    head = " " + fg(AMBER) + "\x1b[1m" + short(st.path) + RESET + fg(DIM) + f"  {len(st.entries)}" + RESET
+    cur = st.current()
+    if cur and not st.entries[st.sel][2]:
+        if cur.lower().endswith(".pdf") and pdf_pages(cur):
+            head += fg(AMBER) + f"   pág. {st.page + 1}/{pdf_pages(cur)}" + RESET
+        elif st.page:
+            head += fg(AMBER) + f"   línea {st.page + 1}" + RESET
+    hint = "←↑↓→ mover · Enter entrar · ⌫ subir · Espacio Vista Previa · ⌘E Finder · . ocultos · Esc salir"
+    return [head] + rows + [" " + fg(DIM) + trunc(hint, W - 2) + RESET]
+
+
+# ---------- teclas ----------
+def parse(buf):
+    """-> (tecla, resto) | None si falta por llegar | ('esc?', buf) si es un ESC suelto."""
+    if not buf:
+        return None
+    b = buf[0]
+    if b != 0x1B:
+        k = {13: "enter", 10: "enter", 127: "back", 8: "back", 32: "space", 3: "quit"}.get(b)
+        if k:
+            return k, buf[1:]
+        if b < 0x80:
+            return chr(b), buf[1:]
+        n = 2 if b < 0xE0 else 3 if b < 0xF0 else 4   # UTF-8: se ignora
+        return ("other", buf[n:]) if len(buf) >= n else None
+    if len(buf) == 1:
+        return "esc?", buf
+    if buf[1] not in b"[O":
+        return "other", buf[2:]
+    m = re.match(rb"\x1b[\[O]([0-9;:<=>?]*)([A-Za-z~])", buf)
+    if not m:
+        return None
+    params, final = m.group(1).decode(), m.group(2).decode()
+    rest = buf[m.end():]
+    if params.startswith("<") and final in "Mm":      # ratón (SGR): rueda = 64 arriba / 65 abajo
+        try:
+            btn = int(params[1:].split(";")[0])
+        except ValueError:
+            return "other", rest
+        if final == "M" and btn & 64 and not btn & 128:
+            return ("wheel-up" if btn & 3 == 0 else "wheel-down" if btn & 3 == 1 else "other"), rest
+        return "other", rest
+    arrows = {"A": "up", "B": "down", "C": "right", "D": "left"}
+    if final in arrows:
+        return arrows[final], rest
+    if final == "u":
+        parts = params.split(";")
+        try:
+            code = int(parts[0].split(":")[0])
+            mods = int(parts[1].split(":")[0]) - 1 if len(parts) > 1 else 0
+        except ValueError:
+            return "other", rest
+        if code == 27: return "esc", rest
+        if code == 13: return "enter", rest
+        if code == 127: return "back", rest
+        if code == 32: return "space", rest
+        if mods & 8 and chr(code) == "e": return "cmd-e", rest
+        if mods & 4 and chr(code) == "c": return "quit", rest
+        return (chr(code), rest) if mods == 0 else ("other", rest)
+    return "other", rest
+
+
+def bg_open(args):
+    subprocess.Popen(["open", *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+
+
+def main():
+    path, cwd_file, dump, sel, st_page = os.getcwd(), None, None, 0, 0
+    for a in sys.argv[1:]:
+        if a.startswith("--cwd-file="): cwd_file = a.split("=", 1)[1]
+        elif a.startswith("--dump="): dump = a.split("=", 1)[1]
+        elif a.startswith("--sel="): sel = int(a.split("=", 1)[1])
+        elif a.startswith("--page="): st_page = int(a.split("=", 1)[1])
+        else: path = os.path.abspath(os.path.expanduser(a))
+    if not os.path.isdir(path):
+        sys.exit(f"cuadricula: no es una carpeta: {path}")
+    st = State(path)
+
+    if dump:
+        W, H = (int(x) for x in dump.split("x"))
+        st.sel = max(0, min(sel, len(st.entries) - 1))
+        st.page = st_page
+        print("\n".join(frame(st, W, H)))
+        return
+
+    st.kitty = kitty_supported()
+    if st.kitty:
+        st.icons = IconWorker()
+    if sel or st_page:                    # estado inicial (--sel / --page), útil para capturas y demos
+        st.sel = max(0, min(sel, len(st.entries) - 1))
+        st.page = st_page
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    dirty = {"v": True}
+    signal.signal(signal.SIGWINCH, lambda *_: dirty.update(v=True))
+    out = sys.stdout
+    out.write("\x1b[?1049h\x1b[?25l\x1b[>1u\x1b[?1000h\x1b[?1006h")   # pantalla alterna, sin cursor, teclado kitty
+    out.flush()
+    tty.setraw(fd)
+    buf = b""
+    want = None
+    wheel_t = 0.0
+    worker = Worker(st.cache, st.dcache)
+
+    def prefetch():
+        cur = st.current()
+        if not (st.kitty and cur and cur.lower().endswith(".pdf") and not st.entries[st.sel][2]):
+            return None
+        sz = shutil.get_terminal_size()
+        rw = panes(sz.columns)[1]
+        n = pdf_pages(cur)
+        if rw <= 0 or not n:
+            return None
+        for d in (1, -1, 2, -2, 3):
+            pg = st.page + d
+            if 0 <= pg < n:
+                need = st.need(rw - 2, preview_h(sz.lines), pg)
+                if need:
+                    return need
+        return None
+
+    def draw(compute):
+        nonlocal want
+        sz = shutil.get_terminal_size()
+        lines = frame(st, sz.columns, sz.lines, compute)
+        img = st.img
+        out.write((PLACE_DEL if st.kitty else "") + "\x1b[H" + "\x1b[K\r\n".join(lines) + "\x1b[K\x1b[J")
+        if st.icons:
+            out.write(icon_cmds(st))
+        if img:
+            iid, transmit, icols, irows, row, col = img
+            if iid not in st.sent:                       # cada imagen se envía una sola vez
+                out.write(transmit)
+                st.sent.append(iid)
+                while len(st.sent) > 8:                   # y se libera la memoria de las antiguas
+                    out.write(f"\x1b_Ga=d,d=I,i={st.sent.pop(0)},q=2\x1b\\")
+            out.write(f"\x1b[{row};{col}H\x1b_Ga=p,i={iid},p=1,c={icols},r={irows},C=1,q=2\x1b\\")
+            st.last_img = (img, st.current())
+        out.flush()
+        lw, rw = panes(sz.columns)
+        want = st.need(rw - 2, preview_h(sz.lines)) if rw > 0 else None
+
+    try:
+        while True:
+            if dirty["v"]:
+                dirty["v"] = False
+                draw(False)   # primero rápido: la vista previa se calcula si no hay más teclas
+            # si falta la vista previa, espera poco: si no llega otra tecla, la calcula
+            busy = want or worker.busy or (st.icons and (st.icons.busy or st.icons.queue))
+            r, _, _ = select.select([fd], [], [], 0.06 if busy else 0.2)
+            if not r:
+                if st.changed():             # carpeta modificada desde fuera: se actualiza sola
+                    st.refresh()
+                    dirty["v"] = True
+                    continue
+                if worker.ready or (st.icons and st.icons.ready):
+                    worker.ready = False
+                    if st.icons:
+                        st.icons.ready = False
+                    draw(False)
+                elif want and (want[0] != worker.last or (worker.busy is None and worker.req is None)):
+                    worker.request(*want)    # se calcula en segundo plano
+                elif want is None and worker.busy is None and worker.req is None:
+                    pf = prefetch()          # tiempo libre: prepara las páginas vecinas del PDF
+                    if pf:
+                        worker.request(*pf)
+                continue
+            data = os.read(fd, 256)
+            if not data:          # entrada cerrada: salir como con Esc
+                buf = b"\x1b"
+                data = b""
+            buf += data
+            res = parse(buf)
+            while res is not None:
+                key, buf = res
+                if key == "esc?":
+                    if select.select([fd], [], [], 0.05)[0]:
+                        more = os.read(fd, 256)
+                        if more:
+                            buf += more
+                            res = parse(buf)
+                            continue
+                    key, buf = "esc", b""
+                sz = shutil.get_terminal_size()
+                _, _, cols, _ = metrics(st, panes(sz.columns)[0], sz.lines)
+                n = len(st.entries)
+                cur = st.current()
+                if key in ("esc", "q", "quit"):
+                    if cwd_file:
+                        with open(cwd_file, "w") as f:
+                            f.write(st.path)
+                    return
+                elif key == "left" and st.sel > 0: st.sel -= 1
+                elif key == "right" and st.sel < n - 1: st.sel += 1
+                elif key == "up" and st.sel - cols >= 0: st.sel -= cols
+                elif key == "down" and st.sel + cols < n: st.sel += cols
+                elif key == "down" and st.sel // cols < (n - 1) // cols: st.sel = n - 1
+                elif key == "enter" and cur:
+                    if st.entries[st.sel][2]: st.go(cur)
+                    else: bg_open([cur])
+                elif key == "back":
+                    parent = os.path.dirname(st.path)
+                    if parent != st.path: st.go(parent, os.path.basename(st.path))
+                elif key == "space" and cur and not st.entries[st.sel][2]:
+                    bg_open(["-a", "Preview", cur])
+                elif key in ("wheel-up", "wheel-down") and cur and not st.entries[st.sel][2]:
+                    d = 1 if key == "wheel-down" else -1
+                    ext = cur.rsplit(".", 1)[-1].lower() if "." in os.path.basename(cur) else ""
+                    now = time.monotonic()
+                    if ext == "pdf":
+                        n = pdf_pages(cur)
+                        if n and now - wheel_t > 0.07:     # el trackpad manda muchos eventos seguidos
+                            st.page = max(0, min(n - 1, st.page + d))
+                            wheel_t = now
+                    elif ext not in IMG_EXT | VIDEO_EXT | {"svg", "heic", "heif"} and is_text(cur):
+                        st.page = max(0, min(max(0, text_lines(cur) - 1), st.page + 3 * d))
+                elif key == "cmd-e" and cur:
+                    bg_open([cur] if st.entries[st.sel][2] else ["-R", cur])
+                elif key == ".":
+                    keep = st.entries[st.sel][0] if st.entries else None
+                    st.hidden = not st.hidden
+                    st.reload()
+                    for i, e in enumerate(st.entries):
+                        if e[0] == keep: st.sel = i
+                if st.current() != cur:
+                    st.page = 0
+                dirty["v"] = True
+                res = parse(buf)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        out.write((KITTY_DEL if st.kitty else "") + "\x1b[?1006l\x1b[?1000l\x1b[<u\x1b[?25h\x1b[?1049l")
+        out.flush()
+
+
+if __name__ == "__main__":
+    main()

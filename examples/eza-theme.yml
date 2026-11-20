@@ -1,0 +1,108 @@
+# Paleta warm-ember para eza (colores tomados de ~/.config/ghostty/themes/warm-ember)
+colourful: true
+
+filekinds:
+  normal:       {foreground: "#f2e3d0"}
+  directory:    {foreground: "#ff9e64", is_bold: true}
+  symlink:      {foreground: "#7dcfb8", is_italic: true}
+  pipe:         {foreground: "#e0af68"}
+  block_device: {foreground: "#f7768e"}
+  char_device:  {foreground: "#f7768e"}
+  socket:       {foreground: "#f7768e"}
+  special:      {foreground: "#d4849a"}
+  executable:   {foreground: "#9ece6a", is_bold: true}
+  mount_point:  {foreground: "#ff9e64", is_bold: true, is_underline: true}
+
+perms:
+  user_read:           {foreground: "#e0af68", is_bold: true}
+  user_write:          {foreground: "#f7768e", is_bold: true}
+  user_execute_file:   {foreground: "#9ece6a", is_bold: true}
+  user_execute_other:  {foreground: "#9ece6a", is_bold: true}
+  group_read:          {foreground: "#e0af68"}
+  group_write:         {foreground: "#f7768e"}
+  group_execute:       {foreground: "#9ece6a"}
+  other_read:          {foreground: "#85766a"}
+  other_write:         {foreground: "#85766a"}
+  other_execute:       {foreground: "#85766a"}
+  special_user_file:   {foreground: "#d4849a"}
+  special_other:       {foreground: "#d4849a"}
+  attribute:           {foreground: "#85766a"}
+
+size:
+  major:        {foreground: "#e0af68"}
+  minor:        {foreground: "#f0c27a"}
+  number_byte:  {foreground: "#94e0ca"}
+  number_kilo:  {foreground: "#9ece6a"}
+  number_mega:  {foreground: "#e0af68"}
+  number_giga:  {foreground: "#ff9e64"}
+  number_huge:  {foreground: "#f7768e", is_bold: true}
+  unit_byte:    {foreground: "#85766a"}
+  unit_kilo:    {foreground: "#85766a"}
+  unit_mega:    {foreground: "#85766a"}
+  unit_giga:    {foreground: "#85766a"}
+  unit_huge:    {foreground: "#85766a"}
+
+users:
+  user_you:           {foreground: "#e0af68", is_bold: true}
+  user_root:          {foreground: "#f7768e", is_bold: true}
+  user_other:         {foreground: "#d4849a"}
+  group_yours:        {foreground: "#e0af68"}
+  group_other:        {foreground: "#85766a"}
+  group_root:         {foreground: "#f7768e"}
+
+links:
+  normal:          {foreground: "#7dcfb8"}
+  multi_link_file: {foreground: "#ff9e64"}
+
+git:
+  new:         {foreground: "#9ece6a", is_bold: true}
+  modified:    {foreground: "#e0af68", is_bold: true}
+  deleted:     {foreground: "#f7768e", is_bold: true}
+  renamed:     {foreground: "#7aa2f7"}
+  typechange:  {foreground: "#d4849a"}
+  ignored:     {foreground: "#85766a"}
+  conflicted:  {foreground: "#ff8fa3", is_bold: true}
+
+git_repo:
+  branch_main:    {foreground: "#9ece6a"}
+  branch_other:   {foreground: "#e0af68"}
+  git_clean:      {foreground: "#9ece6a"}
+  git_dirty:      {foreground: "#f7768e"}
+
+file_type:
+  image:       {foreground: "#d4849a"}
+  video:       {foreground: "#e598ad", is_bold: true}
+  music:       {foreground: "#7dcfb8"}
+  lossless:    {foreground: "#94e0ca"}
+  crypto:      {foreground: "#f7768e"}
+  document:    {foreground: "#f0c27a"}
+  compressed:  {foreground: "#ff8fa3"}
+  temp:        {foreground: "#85766a"}
+  compiled:    {foreground: "#b0dd82"}
+  build:       {foreground: "#e0af68", is_bold: true}
+  source:      {foreground: "#7aa2f7"}
+
+punctuation:   {foreground: "#85766a"}
+date:          {foreground: "#7aa2f7"}
+inode:         {foreground: "#85766a"}
+blocks:        {foreground: "#85766a"}
+header:        {foreground: "#d9c7b0", is_underline: true, is_bold: true}
+octal:         {foreground: "#d4849a"}
+flags:         {foreground: "#d4849a"}
+symlink_path:  {foreground: "#7dcfb8"}
+control_char:  {foreground: "#f7768e"}
+broken_symlink:       {foreground: "#f7768e", is_bold: true}
+broken_path_overlay:  {foreground: "#f7768e", is_underline: true}
+
+# Carpetas conocidas con su propio color, para romper la monotonía
+filenames:
+  Desktop:     {foreground: "#7aa2f7", is_bold: true}
+  Documents:   {foreground: "#f0c27a", is_bold: true}
+  Downloads:   {foreground: "#9ece6a", is_bold: true}
+  Dev:         {foreground: "#7dcfb8", is_bold: true}
+  Pictures:    {foreground: "#d4849a", is_bold: true}
+  Movies:      {foreground: "#e598ad", is_bold: true}
+  Music:       {foreground: "#94e0ca", is_bold: true}
+  Library:     {foreground: "#85766a", is_bold: true}
+  Applications: {foreground: "#ff8fa3", is_bold: true}
+  Public:      {foreground: "#b0dd82", is_bold: true}
