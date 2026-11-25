@@ -38,7 +38,7 @@ It is a single Python file with no pip dependencies. *(Note: it's a file manager
 - ℹ️ **Details** under the preview: type, size, dimensions, pages, duration, lines, date.
 - ⚡ **Always responsive**: previews and icons are computed on background threads; nothing freezes the UI (not even a 12-megapixel HEIC).
 - 🔄 **Live refresh** when the folder changes from outside.
-- ⌨️ **`Cmd+E`** reveals in Finder, **`Space`** opens with Preview, **`Enter`** enters folders.
+- ⌨️ **`Cmd+E`** opens the current folder in Finder, **`Space`** opens with Preview, **`Enter`** enters folders.
 
 ## Gallery
 

@@ -11,7 +11,7 @@ Izquierda: mosaicos con los iconos del sistema. Derecha: vista previa de lo sele
 Teclas: flechas mover · Enter entrar (carpeta) / abrir (fichero) · Retroceso subir ·
         Espacio Vista Previa · Cmd+E Finder · . ocultos · rueda: páginas de PDF / líneas · Esc o q salir
 """
-import atexit, base64, hashlib, itertools, threading, fcntl, os, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time, tty, unicodedata
+import atexit, base64, ctypes, hashlib, itertools, plistlib, threading, fcntl, os, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time, tty, unicodedata
 
 __version__ = "0.1.0"
 EZA = shutil.which("eza") or "/opt/homebrew/bin/eza"
@@ -29,17 +29,30 @@ ICON_ROWS = 5   # alto del icono (filas) · súbelo para iconos más grandes
 TILE_H = ICON_ROWS + 3   # icono + 2 líneas de nombre + 1 de aire
 SEL_BG, TEXT = (74, 54, 38), (242, 227, 208)
 PLACE_DEL = "\x1b_Ga=d,d=a,q=2\x1b\\"   # quita las colocaciones (conserva los datos)
-ICONS_JXA = r"""ObjC.import('AppKit');
+ICONS_JXA = r"""ObjC.import('AppKit'); ObjC.import('CoreImage');
+function tint(rep, c) {
+  // colorea la carpeta: luminosidad del icono * color (en lineal, de ahí el pow y la ganancia)
+  var k = c.map(function(v) { return Math.pow(v / 255, 2.2); }), g = 2.6, w = [0.299 * g, 0.587 * g, 0.114 * g];
+  var f = $.CIFilter.filterWithName('CIColorMatrix');
+  f.setValueForKey($.CIImage.alloc.initWithBitmapImageRep(rep), 'inputImage');
+  ['inputRVector', 'inputGVector', 'inputBVector'].forEach(function(n, j) {
+    f.setValueForKey($.CIVector.vectorWithXYZW(w[0] * k[j], w[1] * k[j], w[2] * k[j], 0), n);
+  });
+  f.setValueForKey($.CIVector.vectorWithXYZW(0, 0, 0, 1), 'inputAVector');
+  return $.NSBitmapImageRep.alloc.initWithCIImage(f.valueForKey('outputImage'));
+}
 function run(argv) {
   var ws = $.NSWorkspace.sharedWorkspace, outdir = argv[0], N = 256;
   for (var i = 1; i < argv.length; i++) {
-    var img = ws.iconForFile($(argv[i]));
+    var cut = argv[i].indexOf('|'), col = argv[i].slice(0, cut), path = argv[i].slice(cut + 1);
+    var img = ws.iconForFile($(path));
     var rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(
       $(), N, N, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
     $.NSGraphicsContext.saveGraphicsState;
     $.NSGraphicsContext.setCurrentContext($.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep));
     img.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, N, N), $.NSZeroRect, $.NSCompositeSourceOver, 1.0);
     $.NSGraphicsContext.restoreGraphicsState;
+    if (col) rep = tint(rep, col.split(',').map(Number));
     var png = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
     png.writeToFileAtomically($(outdir + '/' + (i - 1) + '.png'), true);
   }
@@ -53,6 +66,56 @@ KITTY_DEL = "\x1b_Ga=d,d=A,q=2\x1b\\"   # borra todas las imágenes del protocol
 def kitty_supported():
     t = (os.environ.get("TERM", "") + " " + os.environ.get("TERM_PROGRAM", "")).lower()
     return "ghostty" in t or "kitty" in t
+
+
+# Etiquetas de Finder (color): NSWorkspace no las incluye en el icono, así que se leen del xattr.
+TAG_COLORS = {1: (142, 142, 147), 2: (52, 199, 89), 3: (175, 82, 222), 4: (0, 122, 255),
+              5: (255, 204, 0), 6: (255, 59, 48), 7: (255, 149, 0)}
+_TAG_ATTR = b"com.apple.metadata:_kMDItemUserTags"
+FOLDER_TINT = {1: (143, 143, 148), 2: (51, 199, 89), 3: (176, 82, 222), 4: (0, 122, 255),
+               5: (255, 219, 31), 6: (255, 59, 48), 7: (255, 140, 0)}   # color de la carpeta entera
+NO_TINT = (".app", ".bundle", ".framework", ".xcodeproj", ".xcworkspace", ".pkg", ".photoslibrary")
+try:
+    _libc = ctypes.CDLL(None, use_errno=True)
+    _libc.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+                               ctypes.c_uint32, ctypes.c_int]
+    _libc.getxattr.restype = ctypes.c_ssize_t
+except (OSError, AttributeError):
+    _libc = None
+
+
+def tag_nums(path):
+    """Números de color (0 = sin color, 1..7) de las etiquetas de Finder de path; [] si no tiene."""
+    if _libc is None:
+        return []
+    buf = ctypes.create_string_buffer(8192)
+    n = _libc.getxattr(os.fsencode(path), _TAG_ATTR, buf, len(buf), 0, 0)
+    if n <= 0:
+        return []
+    try:
+        tags = plistlib.loads(buf.raw[:n])
+    except Exception:
+        return []
+    out = []
+    for t in tags if isinstance(tags, list) else []:
+        num = str(t).rpartition("\n")[2] if "\n" in str(t) else ""
+        out.append(int(num) if num.isdigit() else 0)
+    return out
+
+
+def file_tags(path, limit=4):
+    """Colores RGB de los puntos de las etiquetas de Finder de path; las sin color, apagadas."""
+    return [TAG_COLORS.get(n, DIM) for n in tag_nums(path)][:limit]
+
+
+def folder_tint(path, name, isdir):
+    """Color (R, G, B) con el que teñir el icono de la carpeta según su primera etiqueta con color."""
+    if not isdir or name.lower().endswith(NO_TINT) or os.path.exists(os.path.join(path, "Icon\r")):
+        return None            # paquetes (.app…) y carpetas con icono propio se dejan como están
+    for n in tag_nums(path):
+        if n in FOLDER_TINT:
+            return FOLDER_TINT[n]
+    return None
 
 
 def fg(c): return f"\x1b[38;2;{c[0]};{c[1]};{c[2]}m"
@@ -543,7 +606,7 @@ def icon_key(st, i):
     name, _, isdir = st.entries[i]
     path = os.path.join(st.path, name)
     if isdir or "." not in name.strip("."):
-        return ("d" if isdir else "f", path), path
+        return (("d", path, folder_tint(path, name, True)) if isdir else ("f", path)), path
     return ("e", name.rsplit(".", 1)[-1].lower()), path
 
 
@@ -580,7 +643,7 @@ class IconWorker:
                 self.busy = True
             tmp = tempfile.mkdtemp(prefix="tesela-ico-")
             try:
-                run(["osascript", "-l", "JavaScript", self.script, tmp, *[pth for _, pth in batch]], timeout=30)
+                run(["osascript", "-l", "JavaScript", self.script, tmp, *[(",".join(map(str, k[2])) if k[0] == "d" and k[2] else "") + "|" + pth for k, pth in batch]], timeout=30)
                 for n, (key, _) in enumerate(batch):
                     try:
                         with open(os.path.join(tmp, f"{n}.png"), "rb") as f:
@@ -650,11 +713,21 @@ def tile_lines(st, i, selected, has_icon):
             lines.append(" " + bg(SEL_BG) + " " * (TILE_W - 2) + RESET + " ")
         else:
             lines.append(" " * TILE_W)
-    for txt in wrap_name(name, TILE_W - 2)[:2]:
+    full = os.path.join(st.path, name)
+    dots = file_tags(full)
+    if len(dots) == 1 and folder_tint(full, name, isdir):
+        dots = []                                          # ya se ve en la carpeta: sin punto
+    dw = len(dots) + 1 if dots else 0                      # puntos de etiqueta + un espacio
+    for k, txt in enumerate(wrap_name(name, TILE_W - 2 - dw)[:2]):
+        pre = ""
+        if k == 0 and dots:
+            pre = "".join(fg(c) + "●" for c in dots)
+            pre = (bg(DARK) + pre + " " if selected else pre + " ") + RESET
+        pw = dw if k == 0 else 0
         if selected:
-            lines.append(center_row(bg(AMBER) + fg(DARK) + "\x1b[1m " + txt + " " + RESET, vis(txt) + 2, False))
+            lines.append(center_row(pre + bg(AMBER) + fg(DARK) + "\x1b[1m " + txt + " " + RESET, vis(txt) + 2 + pw, False))
         else:
-            lines.append(center_row(fg(AMBER if isdir else TEXT) + txt + RESET, vis(txt), False))
+            lines.append(center_row(pre + fg(AMBER if isdir else TEXT) + txt + RESET, vis(txt) + pw, False))
     while len(lines) < TILE_H:
         lines.append(" " * TILE_W)
     return lines[:TILE_H]
@@ -962,8 +1035,8 @@ def main():
                             wheel_t = now
                     elif ext not in IMG_EXT | VIDEO_EXT | {"svg", "heic", "heif"} and is_text(cur):
                         st.page = max(0, min(max(0, text_lines(cur) - 1), st.page + 3 * d))
-                elif key == "cmd-e" and cur:
-                    bg_open([cur] if st.entries[st.sel][2] else ["-R", cur])
+                elif key == "cmd-e":
+                    bg_open([st.path])           # abre Finder en la carpeta actual, no en el elemento seleccionado
                 elif key == ".":
                     keep = st.entries[st.sel][0] if st.entries else None
                     st.hidden = not st.hidden

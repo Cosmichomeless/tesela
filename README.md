@@ -38,7 +38,7 @@ Es un único fichero de Python, sin dependencias de pip.
 - ℹ️ **Detalles** bajo la vista previa: tipo, tamaño, dimensiones, páginas, duración, líneas, fecha.
 - ⚡ **Siempre responde**: las vistas previas y los iconos se calculan en hilos aparte; nada congela la pantalla (ni siquiera un HEIC de 12 megapíxeles).
 - 🔄 **Se actualiza solo** cuando la carpeta cambia desde fuera.
-- ⌨️ **`Cmd+E`** abre en el Finder, **`Espacio`** abre con Vista Previa, **`Enter`** entra en carpetas.
+- ⌨️ **`Cmd+E`** abre en el Finder la carpeta actual, **`Espacio`** abre con Vista Previa, **`Enter`** entra en carpetas.
 
 ## Galería
 
